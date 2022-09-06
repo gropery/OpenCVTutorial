@@ -1,6 +1,31 @@
+"""
+ 功能：手势操作电脑音量
+ 1、使用OpenCV读取摄像头视频流；
+ 2、识别手掌关键点像素坐标；
+ 3、根据拇指和食指指尖的坐标，利用勾股定理计算距离；
+ 4、将距离等比例转为音量大小，控制电脑音量
+ """
+
+import math
+
 import cv2
 import mediapipe as mp
 import time
+import numpy as np
+
+
+# 导入电脑音量控制模块
+from ctypes import cast, POINTER
+from comtypes import CLSCTX_ALL
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+
+# 获取电脑音量范围
+devices = AudioUtilities.GetSpeakers()
+interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+volume = cast(interface, POINTER(IAudioEndpointVolume))
+volume_range = volume.GetVolumeRange()
+rect_height = 0
+rect_percent_text = 0
 
 # mediapipe 画线工具
 mpDraw = mp.solutions.drawing_utils
@@ -27,18 +52,9 @@ if not cap.isOpened():
     print("Cannot open camera")
     exit()
 
-# 全局变量
-frameNum = 0
-commandLst = []
-commandSending = ''
-commandDict = {'right': '10', 'left': '01', 'forward': '11', 'backforward': '00', 'unKnown': '-1'}
+
 
 while True:
-    # 初始化0关键点的坐标
-    lst = [0, 0, 0]
-    # 初始化字典
-    distanceDict = {}
-
     # success是布尔型，读取帧正确返回True;img是每一帧的图像（BGR存储格式）
     success, img = cap.read()
     if not success:
@@ -47,30 +63,46 @@ while True:
 
     # 将一幅图像从一个色彩空间转换为另一个,返回转换后的色彩空间图像
     imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    h, w, c = img.shape
 
     # 处理RGB图像并返回手的标志点和检测到的每个手对象
     results = hands.process(imgRGB)
 
-    # results.multi_hand_landmarks返回None或手的标志点坐标
+    # # 判断是否有手掌，会得到手的列表记录了手的坐标
     if results.multi_hand_landmarks:
+        # 遍历每个手掌
         for handLms in results.multi_hand_landmarks:
+            # h-height,w-weight图像的宽度和高度
+
+
+            # 找到食指和拇指关节点,计算2者距离,并显示于图片中
+            shizhi_postion = (int(handLms.landmark[8].x * w), int(handLms.landmark[8].y * h))
+            muzhi_postion = (int(handLms.landmark[4].x * w), int(handLms.landmark[4].y * h))
+            distance = int(shizhi_postion[0] - muzhi_postion[0]) ** 2 + int(shizhi_postion[1] - muzhi_postion[1]) ** 2
+            distance = int(math.sqrt(distance))
+            distancexy = (int(((muzhi_postion[0] + shizhi_postion[0]) / 2)), int(((muzhi_postion[1] + shizhi_postion[1]) / 2)))
+
+            cv2.line(img, muzhi_postion, shizhi_postion, (255, 0, 0), 5)
+            cv2.putText(img, str(distance), distancexy, cv2.FONT_HERSHEY_PLAIN, 1, (255, 0, 255), 1)
+
+            # 获取电脑最大最小音量
+            min_volume = volume_range[0]
+            max_volume = volume_range[1]
+            # 将指尖长度映射到音量上
+            vol = np.interp(distance, [50, 300], [min_volume, max_volume])
+            # 将指尖长度映射到矩形显示上
+            rect_height = np.interp(distance, [50, 300], [0, 200])
+            rect_percent_text = np.interp(distance, [50, 300], [0, 100])
+            # 设置电脑音量
+            volume.SetMasterVolumeLevel(vol, None)
+
             # landmark有21个（具体查阅上面的参考网址），id是索引，lm是x,y坐标
             for id, lm in enumerate(handLms.landmark):
                 # print(id, lm)  # lm的坐标是点在图像中的比例坐标
-                # h-height,w-weight图像的宽度和高度
-                h, w, c = img.shape
                 # 将landmark的比例坐标转换为在图像像素上的坐标
                 cx, cy = int(lm.x * w), int(lm.y * h)
                 # 将手的标志点个性化显示
                 cv2.circle(img, (cx, cy), int(w / 50), (255, 0, 255), cv2.FILLED)
-
-                # 存储0关键点的三个坐标
-                if id == 0:
-                    lst = [lm.x, lm.y, lm.z]
-
-                # 分别检测4，8，12，20四个关键结点与0结点间的距离判断手指指向
-                if id == 4 or id == 8 or id == 12 or id == 20:
-                    distanceDict[id] = (lst[0] - lm.x) ** 2 + (lst[1] - lm.y) ** 2 + (lst[2] - lm.z) ** 2
 
             # # 打印左右手
             # print('Handedness:', results.multi_handedness)
@@ -79,24 +111,10 @@ while True:
             # 在图像上绘制手的标志点和他们的连接线
             mpDraw.draw_landmarks(img, handLms, mpHands.HAND_CONNECTIONS, DrawingSpec_point, DrawingSpec_line)
 
-    command = 'UnKnown'
-    if distanceDict == {}:
-        MaxId = 0
-    else:
-        # 取4根手指中最长距离的手指对应的ID
-        MaxId = [key for key, value in distanceDict.items() if value == max(distanceDict.values())][0]
-    # 判断哪个结点距离根节点最远，并由此给出相应的命令
-    if MaxId == 4:
-        command = 'right'
-    if MaxId == 8:
-        command = 'left'
-    if MaxId == 12:
-        command = 'forward'
-    if MaxId == 20:
-        command = 'backforward'
-    if MaxId == 0:
-        command = 'unKnown'
-    cv2.putText(img, command, (10, 150), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 255), 3)
+    # 显示音量矩形
+    cv2.putText(img, str(math.ceil(rect_percent_text)) + "%", (10, 350), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
+    img = cv2.rectangle(img, (30, 100), (70, 300), (255, 0, 0), 3)
+    img = cv2.rectangle(img, (30, math.ceil(300 - rect_height)), (70, 300), (255, 0, 0), -1)
 
     # 计算并显示帧率
     cTime = time.time()
@@ -107,23 +125,6 @@ while True:
 
     # 在Image窗口上显示新绘制的图像img
     cv2.imshow("Image", img)
-
-    # 连续判断5帧图像,如果都指示同一手指ID,则判定准确并输出
-    frameNum += 1
-    commandLst.append(command)
-    if frameNum == 5:
-        if max(commandLst) == min(commandLst):
-            commandSending = commandDict[command]
-        else:
-            commandSending = commandDict['unKnown']
-
-        # 数据重新置零
-        frameNum = 0
-        commandLst = []
-
-        print(commandSending)
-    else:
-        continue
 
     # 按下q退出程序
     if cv2.waitKey(1) == ord('q'):
